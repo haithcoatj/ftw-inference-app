@@ -1,5 +1,4 @@
-import { ref, shallowRef, watch, computed } from 'vue'
-import type TileSource from 'ol/source/Tile'
+import { ref, shallowRef, watch } from 'vue'
 import type Map from 'ol/Map'
 import VectorSource from 'ol/source/Vector'
 import VectorLayer from 'ol/layer/Vector'
@@ -28,23 +27,8 @@ import { inferenceStyle } from '../layers/color-scales'
 
 let featureId = 0
 
-const loadingCount = ref(0)
-export const isLayerLoading = computed(() => loadingCount.value > 0)
-
-export function trackTileSource(source: TileSource): () => void {
-  const onStart = () => {
-    loadingCount.value++
-  }
-  const onEnd = () => {
-    loadingCount.value = Math.max(0, loadingCount.value - 1)
-  }
-  source.on('tileloadstart', onStart)
-  source.on(['tileloadend', 'tileloaderror'], onEnd)
-  return () => {
-    source.un('tileloadstart', onStart)
-    source.un(['tileloadend', 'tileloaderror'], onEnd)
-  }
-}
+const isLayerLoading = ref(false)
+export { isLayerLoading }
 
 export interface AreaValues {
   min_area_km2: number
@@ -55,6 +39,15 @@ export interface AreaValues {
 const { settings } = useSettings()
 
 export const map = shallowRef<Map | null>(null)
+watch(map, (newMap) => {
+  if (!newMap) return
+  newMap.on('loadstart', () => {
+    isLayerLoading.value = true
+  })
+  newMap.on('loadend', () => {
+    isLayerLoading.value = false
+  })
+})
 const areaValues = ref<AreaValues>({
   min_area_km2: 100,
   max_area_km2: 500,
@@ -73,13 +66,6 @@ export const geoJsonResults = shallowRef<any[]>([])
 
 // Cloudless layer management
 const cloudlessLayer = shallowRef<TileLayer<XYZ> | null>(null)
-
-let untrackCloudless: (() => void) | null = null
-watch(cloudlessLayer, (newLayer) => {
-  untrackCloudless?.()
-  const src = newLayer?.getSource() as TileSource | null
-  untrackCloudless = src ? trackTileSource(src) : null
-})
 
 // Watch for year changes and update the cloudless layer
 watch(
@@ -124,20 +110,6 @@ const initCloudlessLayer = () => {
 const s2GridLayer = shallowRef<VectorLayer<VectorSource> | null>(null)
 const globalPredictionsLayer = shallowRef<GlobalPredictionsController | null>(null)
 const globalOverviewLayer = shallowRef<GlTileLayer | null>(null)
-
-let untrackGlobalPredictions: (() => void) | null = null
-watch(globalPredictionsLayer, (newLayer) => {
-  untrackGlobalPredictions?.()
-  const src = newLayer?.layer.getSource() as TileSource | null
-  untrackGlobalPredictions = src ? trackTileSource(src) : null
-})
-
-let untrackGlobalOverview: (() => void) | null = null
-watch(globalOverviewLayer, (newLayer) => {
-  untrackGlobalOverview?.()
-  const src = newLayer?.getSource() as TileSource | null
-  untrackGlobalOverview = src ? trackTileSource(src) : null
-})
 
 let thresholdDebounce: ReturnType<typeof setTimeout> | null = null
 watch(

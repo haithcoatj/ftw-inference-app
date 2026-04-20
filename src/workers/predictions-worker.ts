@@ -10,7 +10,7 @@ const TILE_SIZE = 512
 const tileGrid = createXYZ({ tileSize: [TILE_SIZE, TILE_SIZE] })
 const canvas = new OffscreenCanvas(TILE_SIZE, TILE_SIZE)
 
-const threshold = 0.4
+let currentThreshold = 0.4
 const key = 'confidence_mean'
 
 const stroke = new Stroke({
@@ -25,16 +25,13 @@ const polyStyle = new Style({ stroke, fill })
 const smallStyle = new Style({ stroke })
 
 const layer = new VectorTileLayer({
+  renderMode: 'vector',
   declutter: false,
-  source: new PMTilesVectorSource({
-    overlaps: false,
-    url: 'https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/ftw/global-field-boundaries/pmtiles/ftw-global-fields-2025.pmtiles',
-  }),
 })
 
 layer.setStyle((feature, resolution) => {
   const confidence = feature.get(key)
-  if (confidence <= threshold) return undefined
+  if (confidence <= currentThreshold) return undefined
   stroke.setColor(getColorForValue(confidenceColorScale, confidence, 1))
   const extent = feature.getGeometry()!.getExtent()
   const widthPx = (extent[2] - extent[0]) / resolution
@@ -53,32 +50,76 @@ const map = new Map({
 })
 map.setSize([TILE_SIZE, TILE_SIZE])
 
-const source = layer.getSource()!
-const sourceReady = new Promise<void>((resolve) => {
-  if (source.getState() === 'ready') {
-    resolve()
-    return
-  }
-  const check = () => {
-    if (source.getState() === 'ready') {
-      resolve()
-    } else {
-      source.once('change', check)
-    }
-  }
-  source.once('change', check)
+layer.on('prerender', () => {
+  canvas.width = TILE_SIZE
 })
 
-self.addEventListener('message', async ({ data: { action, tile } }) => {
-  if (action !== 'render') return
-  await sourceReady
+let sourceReady: Promise<void> | null = null
+let isRendering = false
+let pendingRender: { tile: number[] } | null = null
+
+function startRender(tile: number[]) {
+  isRendering = true
   const view = new View({
     center: tileGrid.getTileCoordCenter(tile),
     resolution: tileGrid.getResolution(tile[0]),
   })
   map.setView(view)
   map.once('rendercomplete', () => {
+    if (pendingRender) {
+      const { tile: nextTile } = pendingRender
+      pendingRender = null
+      startRender(nextTile)
+      return
+    }
+    isRendering = false
     const imageData = canvas.transferToImageBitmap()
     self.postMessage({ action: 'rendered', imageData }, [imageData] as any)
   })
+}
+
+self.addEventListener('message', async ({ data: { action, tile, url, threshold } }) => {
+  if (action === 'init') {
+    currentThreshold = threshold
+    const source = new PMTilesVectorSource({ overlaps: false, url })
+    layer.setSource(source)
+    sourceReady = new Promise<void>((resolve, reject) => {
+      if (source.getState() === 'ready') {
+        resolve()
+        return
+      }
+      if (source.getState() === 'error') {
+        reject(new Error('Source failed to load'))
+        return
+      }
+      const timeout = setTimeout(() => reject(new Error('Source timed out')), 10000)
+      const check = () => {
+        if (source.getState() === 'ready') {
+          clearTimeout(timeout)
+          resolve()
+        } else if (source.getState() === 'error') {
+          clearTimeout(timeout)
+          reject(new Error('Source failed to load'))
+        } else source.once('change', check)
+      }
+      source.once('change', check)
+    })
+    return
+  }
+  if (action === 'updateThreshold') {
+    currentThreshold = threshold
+    return
+  }
+  if (action !== 'render') return
+  try {
+    await sourceReady
+  } catch {
+    self.postMessage({ action: 'error' })
+    return
+  }
+  if (isRendering) {
+    pendingRender = { tile }
+  } else {
+    startRender(tile)
+  }
 })
