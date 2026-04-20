@@ -1,54 +1,79 @@
-import VectorTileLayer from 'ol/layer/VectorTile'
-import { PMTilesVectorSource } from 'ol-pmtiles'
-import { Fill, Stroke, Style } from 'ol/style'
-import {
-  GLOBAL_DATA_PMTILES_THRESHOLD_METRIC,
-  GLOBAL_DATA_MAP_FIELD_START_ZOOM_LEVEL,
-  get_global_pmtiles_url,
-  type Settings,
-} from '../composables/useSettings'
-import { confidenceColorScale, getColorForValue } from './color-scales'
+import TileLayer from 'ol/layer/Tile'
+import ImageTileSource from 'ol/source/ImageTile'
+import { GLOBAL_DATA_MAP_FIELD_START_ZOOM_LEVEL, type Settings } from '../composables/useSettings'
 
-export function createGlobalPredictionsLayer(settings: Settings) {
-  const layer = new VectorTileLayer({
-    declutter: false,
-    source: new PMTilesVectorSource({
-      overlaps: false,
-      url: get_global_pmtiles_url(settings.year),
-    }),
-    minZoom: GLOBAL_DATA_MAP_FIELD_START_ZOOM_LEVEL,
-    properties: {
-      name: `global-predictions`,
-    },
-  })
-  updateGlobalPredictionsLayer(layer, settings)
-  return layer
+export interface GlobalPredictionsController {
+  layer: TileLayer<ImageTileSource>
+  update(settings: Settings): void
+  dispose(): void
 }
 
-export function updateGlobalPredictionsLayer(layer: VectorTileLayer, settings: Settings) {
-  const key = `confidence_${GLOBAL_DATA_PMTILES_THRESHOLD_METRIC}`
-  const stroke = new Stroke({
-    color: '',
-    width: 1,
-    lineCap: 'butt',
-    lineJoin: 'miter',
-    miterLimit: 1,
+export function createGlobalPredictionsLayer(_settings: Settings): GlobalPredictionsController {
+  const worker = new Worker(new URL('../workers/predictions-worker.ts', import.meta.url), {
+    type: 'module',
   })
-  const fill = new Fill({ color: '' })
-  const polyStyle = new Style({ stroke, fill })
-  const smallStyle = new Style({ stroke })
-  layer.setStyle((feature, resolution) => {
-    const confidence = feature.get(key)
-    if (confidence <= settings.threshold) return undefined
-    const strokeColor = getColorForValue(confidenceColorScale, confidence, 1)
-    stroke.setColor(strokeColor)
-    const extent = feature.getGeometry()!.getExtent()
-    const widthPx = (extent[2] - extent[0]) / resolution
-    const heightPx = (extent[3] - extent[1]) / resolution
-    if (widthPx < 3 && heightPx < 3) {
-      return smallStyle
-    }
-    fill.setColor(getColorForValue(confidenceColorScale, confidence, 0.3))
-    return polyStyle
+
+  const tileQueue: Array<() => void> = []
+
+  const source = new ImageTileSource({
+    tileSize: 512,
+    loader: (z, x, y, { signal }) => {
+      return new Promise<ImageBitmap>((resolve, reject) => {
+        if (signal.aborted) {
+          reject(signal.reason)
+          return
+        }
+        const loadTile = () => {
+          if (signal.aborted) {
+            // Tile was aborted while waiting in queue — skip it
+            reject(signal.reason)
+            tileQueue.shift()
+            tileQueue[0]?.()
+            return
+          }
+          const handleMessage = ({ data: { action, imageData } }: MessageEvent) => {
+            if (action !== 'rendered') return
+            worker.removeEventListener('message', handleMessage)
+            resolve(imageData)
+            tileQueue.shift()
+            tileQueue[0]?.()
+          }
+          signal.addEventListener(
+            'abort',
+            () => {
+              worker.removeEventListener('message', handleMessage)
+              reject(signal.reason)
+              tileQueue.shift()
+              tileQueue[0]?.()
+            },
+            { once: true },
+          )
+          worker.addEventListener('message', handleMessage)
+          worker.postMessage({ action: 'render', tile: [z, x, y] })
+        }
+        // Reject immediately if aborted while still in queue (before loadTile runs)
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        if (tileQueue.length === 0) {
+          loadTile()
+        }
+        tileQueue.push(loadTile)
+      })
+    },
   })
+
+  const layer = new TileLayer({
+    source,
+    minZoom: GLOBAL_DATA_MAP_FIELD_START_ZOOM_LEVEL,
+    properties: { name: 'global-predictions' },
+  })
+
+  return {
+    layer,
+    update(_newSettings: Settings) {
+      // TODO: threshold/year updates
+    },
+    dispose() {
+      worker.terminate()
+    },
+  }
 }

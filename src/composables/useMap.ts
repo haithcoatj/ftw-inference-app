@@ -3,7 +3,6 @@ import type TileSource from 'ol/source/Tile'
 import type Map from 'ol/Map'
 import VectorSource from 'ol/source/Vector'
 import VectorLayer from 'ol/layer/Vector'
-import VectorTileLayer from 'ol/layer/VectorTile'
 import GlTileLayer from 'ol/layer/WebGLTile.js'
 import TileLayer from 'ol/layer/Tile'
 import type XYZ from 'ol/source/XYZ'
@@ -17,7 +16,7 @@ import createCloudlessLayer from '../layers/S2-Cloudless-Layer'
 import createS2GridLayer from '../layers/S2-Grid-Layer'
 import {
   createGlobalPredictionsLayer,
-  updateGlobalPredictionsLayer,
+  type GlobalPredictionsController,
 } from '../layers/Global-Predictions-Layer'
 import { Fill, Stroke, Style } from 'ol/style'
 import { type FeatureLike } from 'ol/Feature'
@@ -102,12 +101,13 @@ watch(
 
     if (settings.value.mode === 'global') {
       if (globalPredictionsLayer.value) {
-        map.value.removeLayer(globalPredictionsLayer.value)
+        map.value.removeLayer(globalPredictionsLayer.value.layer)
+        globalPredictionsLayer.value.dispose()
         globalPredictionsLayer.value = null
       }
 
       globalPredictionsLayer.value = createGlobalPredictionsLayer(settings.value)
-      map.value.addLayer(globalPredictionsLayer.value)
+      map.value.addLayer(globalPredictionsLayer.value.layer)
     }
   },
 )
@@ -122,13 +122,13 @@ const initCloudlessLayer = () => {
 
 // Global predictions and S2 grid layer management
 const s2GridLayer = shallowRef<VectorLayer<VectorSource> | null>(null)
-const globalPredictionsLayer = shallowRef<VectorTileLayer | null>(null)
+const globalPredictionsLayer = shallowRef<GlobalPredictionsController | null>(null)
 const globalOverviewLayer = shallowRef<GlTileLayer | null>(null)
 
 let untrackGlobalPredictions: (() => void) | null = null
 watch(globalPredictionsLayer, (newLayer) => {
   untrackGlobalPredictions?.()
-  const src = newLayer?.getSource() as TileSource | null
+  const src = newLayer?.layer.getSource() as TileSource | null
   untrackGlobalPredictions = src ? trackTileSource(src) : null
 })
 
@@ -149,7 +149,7 @@ watch(
         updateGlobalOverviewLayer(globalOverviewLayer.value, settings.value)
       }
       if (globalPredictionsLayer.value) {
-        updateGlobalPredictionsLayer(globalPredictionsLayer.value, settings.value)
+        globalPredictionsLayer.value.update(settings.value)
       }
     }, 80)
   },
@@ -170,7 +170,7 @@ const updateLayers = () => {
     if (!globalPredictionsLayer.value) {
       // Only handle first initialization here, year changes are handled by a watcher on year above
       globalPredictionsLayer.value = createGlobalPredictionsLayer(settings.value)
-      map.value.addLayer(globalPredictionsLayer.value)
+      map.value.addLayer(globalPredictionsLayer.value.layer)
     }
     if (!globalOverviewLayer.value) {
       globalOverviewLayer.value = createGlobalOverviewLayer(settings.value)
@@ -185,7 +185,8 @@ const updateLayers = () => {
 
     // Remove global predictions layers if they exist
     if (globalPredictionsLayer.value) {
-      map.value.removeLayer(globalPredictionsLayer.value)
+      map.value.removeLayer(globalPredictionsLayer.value.layer)
+      globalPredictionsLayer.value.dispose()
       globalPredictionsLayer.value = null
     }
     if (globalOverviewLayer.value) {
